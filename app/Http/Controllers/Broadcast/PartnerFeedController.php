@@ -89,7 +89,14 @@ class PartnerFeedController extends Controller
         }
 
         $etag = '"' . $payload['meta']['version'] . '"';
-        if (trim((string) $request->header('If-None-Match')) === $etag) {
+
+        // Proxies/compression (e.g. Hostinger LiteSpeed) turn the ETag into a weak one: W/"42".
+        // Accept both forms, and a comma-separated list.
+        $sent = array_map(
+            fn($tag) => preg_replace('#^W/#', '', trim($tag)),
+            explode(',', (string) $request->header('If-None-Match'))
+        );
+        if (in_array($etag, $sent, true)) {
             return response('', 304)->header('ETag', $etag);
         }
 
