@@ -2,6 +2,8 @@
 
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Auth\AuthController;
+use App\Http\Controllers\Broadcast\BroadcastControlController;
+use App\Http\Controllers\Broadcast\PartnerFeedController;
 use App\Http\Controllers\Event\EventController;
 use App\Http\Controllers\Team\TeamController;
 use App\Http\Controllers\User\UserController;
@@ -13,6 +15,15 @@ use App\Http\Controllers\User\PlayerStatsController;
 
 Route::post('login', [AuthController::class, 'login']);
 Route::post('refresh', [AuthController::class, 'refresh']);
+
+// Broadcaster / media partner API (X-API-Key)
+Route::prefix('v1/broadcast')
+    ->middleware(['broadcast.partner', 'throttle:broadcast-partner'])
+    ->group(function () {
+        Route::get('matches', [PartnerFeedController::class, 'matches']);
+        Route::get('matches/{id}/live', [PartnerFeedController::class, 'live']);
+        Route::post('socket-auth', [PartnerFeedController::class, 'socketAuth']);
+    });
 
 Route::middleware('auth:api')->group(function () {
 
@@ -67,6 +78,13 @@ Route::middleware('auth:api')->group(function () {
         Route::get('{id}/best-performance', [MatchController::class, 'bestPerformance']);
         Route::get('{id}/player-stats/{player_id}', [MatchController::class, 'playerStats']);
         Route::post('{id}/update-substitutes', [MatchController::class, 'updateSubstitutes']);
+
+        // Broadcast Feed panel on the scoring page
+        Route::get('{id}/broadcast', [BroadcastControlController::class, 'status']);
+        Route::post('{id}/broadcast/enable', [BroadcastControlController::class, 'enable']);
+        Route::post('{id}/broadcast/disable', [BroadcastControlController::class, 'disable']);
+        Route::post('{id}/broadcast/mode', [BroadcastControlController::class, 'mode']);
+        Route::post('{id}/broadcast/publish', [BroadcastControlController::class, 'publish']);
     });
 
     Route::prefix('matches/{match}')->group(function () {

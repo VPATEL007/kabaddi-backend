@@ -6,6 +6,7 @@ use App\Enums\MatchStatus;
 use App\Models\EventLog;
 use App\Models\GameMatch;
 use App\Models\Raid;
+use App\Services\Broadcast\BroadcastPublisher;
 use App\Services\Scoreboard\ScoreboardServiceInterface;
 use Exception;
 use Illuminate\Support\Facades\DB;
@@ -249,6 +250,8 @@ class RaidService implements RaidServiceInterface
             'score_after_raid' => $data['teamBreakdowns'] ?? [],
         ]);
 
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_RAID_COMPLETED);
+
         return $raid->load(['defenders', 'tacklers', 'defenderLineouts']);
     }
 
@@ -376,6 +379,8 @@ class RaidService implements RaidServiceInterface
             ]);
         });
 
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_CORRECTED);
+
         return $raid->load(['defenders', 'tacklers', 'defenderLineouts']);
     }
 
@@ -420,6 +425,8 @@ class RaidService implements RaidServiceInterface
             $match->status = MatchStatus::UPCOMING;
         }
         $match->save();
+
+        app(BroadcastPublisher::class)->trigger($match->id, BroadcastPublisher::EVENT_CORRECTED);
     }
 
     public function skip(int $matchId, array $data): Raid
@@ -477,6 +484,9 @@ class RaidService implements RaidServiceInterface
             'summary' => $data['event_summary'] ?? 'Raid skipped',
             'score_after_raid' => $data['teamBreakdowns'] ?? [],
         ]);
+
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_RAID_SKIPPED);
+
         return $raid->load(['defenders', 'tacklers', 'defenderLineouts']);
     }
 

@@ -5,6 +5,7 @@ namespace App\Services\Event;
 use App\Enums\EventType;
 use App\Models\EventLog;
 use App\Models\MatchPlayer;
+use App\Services\Broadcast\BroadcastPublisher;
 use App\Services\Event\EventServiceInterface;
 use App\Services\Raid\RaidServiceInterface;
 use App\Services\Scoreboard\ScoreboardServiceInterface;
@@ -55,6 +56,13 @@ class EventService implements EventServiceInterface
         $event->score_after_raid = $scoreboard->teamBreakdowns ?? [];
         $event->save();
 
+        app(BroadcastPublisher::class)->trigger((int) $data['match_id'], match ($event->type?->value) {
+            EventType::TECHNICAL_POINT->value => BroadcastPublisher::EVENT_TECHNICAL_POINT,
+            EventType::CARD->value => BroadcastPublisher::EVENT_CARD,
+            EventType::UPDATE_SUBSTITUTES->value => BroadcastPublisher::EVENT_SUBSTITUTION,
+            default => BroadcastPublisher::EVENT_STATUS,
+        });
+
         return $event->refresh();
     }
 
@@ -74,6 +82,8 @@ class EventService implements EventServiceInterface
         $scoreboard = $scoreService->getMatchScoreboard($data['match_id']);
         $event->score_after_raid = $scoreboard->teamBreakdowns ?? [];
         $event->save();
+
+        app(BroadcastPublisher::class)->trigger((int) $event->match_id, BroadcastPublisher::EVENT_CORRECTED);
 
         return $event->refresh();
     }
@@ -128,5 +138,7 @@ class EventService implements EventServiceInterface
         }
 
         $event->delete();
+
+        app(BroadcastPublisher::class)->trigger((int) $event->match_id, BroadcastPublisher::EVENT_CORRECTED);
     }
 }
