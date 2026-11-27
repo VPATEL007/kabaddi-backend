@@ -392,7 +392,7 @@ class LiveFeedBuilder
         // Revival order: players who are out, oldest out first (same order RaidService revives them).
         $outQueue = $teamPlayers
             ->filter(fn($mp) => !$mp->is_substitute && !$mp->is_playing)
-            ->sortBy('updated_at')
+            ->sortBy([['updated_at', 'asc'], ['id', 'asc']])
             ->values()
             ->pluck('user_id')
             ->map(fn($id) => (int) $id)

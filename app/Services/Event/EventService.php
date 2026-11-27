@@ -119,7 +119,26 @@ class EventService implements EventServiceInterface
         if ($event->type && ($event->type->value === EventType::UPDATE_SUBSTITUTES->value)) {
             $subPlayers = $event->payload;
 
+            // Replacements: the two players traded slots, so trade them back.
+            $swappedBack = [];
             foreach ($subPlayers as $subPlayer) {
+                if (empty($subPlayer['slot_with'])) {
+                    continue;
+                }
+                $pair = MatchPlayer::where('match_id', $event->match_id)
+                    ->whereIn('user_id', [$subPlayer['id'], $subPlayer['slot_with']])
+                    ->get();
+                if ($pair->count() === 2) {
+                    MatchPlayer::swapSlots($pair[0], $pair[1]);
+                }
+                $swappedBack[] = (int) $subPlayer['id'];
+                $swappedBack[] = (int) $subPlayer['slot_with'];
+            }
+
+            foreach ($subPlayers as $subPlayer) {
+                if (in_array((int) $subPlayer['id'], $swappedBack, true)) {
+                    continue;
+                }
                 $matchPlayer = MatchPlayer::where('match_id', $event->match_id)
                     ->where('user_id', $subPlayer['id'])
                     ->first();

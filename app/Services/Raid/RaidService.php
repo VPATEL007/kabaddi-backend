@@ -497,6 +497,7 @@ class RaidService implements RaidServiceInterface
             ->where('is_playing', false)
             ->where('is_substitute', false)
             ->orderBy('updated_at', 'asc')
+            ->orderBy('id', 'asc') // same raid => same timestamp; slot id keeps it stable
             ->take($count)
             ->get();
 
