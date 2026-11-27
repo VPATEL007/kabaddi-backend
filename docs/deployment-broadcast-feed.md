@@ -52,7 +52,15 @@ php artisan migrate --force
 
 - This only creates tables that don't exist yet: `broadcast_partners`, `broadcast_partner_access`, `match_broadcast_states`, `match_feed_snapshots`. Existing data is not changed.
 - Check first with `php artisan migrate:status`. Only `2026_11_27_000001_create_broadcast_tables` should show as pending.
+- **If many old migrations show as "Pending"** even though the tables exist (as on statifyy.com, where the database was imported without migration history), **do not run a plain `migrate`**. Run only this migration:
+  ```bash
+  php artisan migrate --force --path=database/migrations/2026_11_27_000001_create_broadcast_tables.php
+  ```
 - **Never** run `migrate:fresh` or `migrate:refresh`.
+
+> **Hosting note (statifyy.com):** production is on Hostinger **shared** hosting (no sudo or Supervisor), which can't run Reverb. Part A works there; Part B needs a separate small VPS that runs only Reverb, with `REVERB_BACKEND_*` and `REVERB_HOST` pointing at it. Until then keep `BROADCAST_CONNECTION=null`. The REST feed (`/live`) and the scoring panel still work.
+>
+> **Backups on shared hosting:** `mysqldump` must use the local socket (`--protocol=socket --socket=/var/lib/mysql/mysql.sock`), because the database user is not allowed over TCP. The server's `.env` has Windows (CRLF) line endings, so strip `\r` when reading values in scripts.
 
 ### A4 – Add Reverb settings to `.env`
 
