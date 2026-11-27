@@ -9,22 +9,30 @@ use App\Models\Raid;
 use RuntimeException;
 
 /**
- * Builds the broadcaster live feed for one match, in the client's JSON format.
+ * Builds the broadcaster live feed for one match, in the client's JSON format
+ * (structure and key names follow the client's sample "Live Scoring API.json").
  *
  * Scoring rules mirror ScoreboardService::getMatchScoreboard() so the feed totals
  * always equal the scoring app's totals. Client mapping decisions:
  *  - client key names kept; numbers sent as strings; "successfull-raids" spelling corrected
- *  - raid-outcome-id: 1 = successful, 2 = unsuccessful, 3 = empty (skipped raids are left out)
- *  - extra-points = technical points + lineout points; bonus goes under raid-points.raid-bonus
- *  - tackle-points.tackle-bonus = super tackle extra point
- *  - cards and substitutions are included in "match-events"
+ *  - player-on-court only when on court, player-revival-order only when out (as in the sample)
+ *  - extra-points = technical points + lineout points; bonus goes under raid-points
+ *  - tackle-bonus-points = super tackle extra point
+ *  - removed: points-last-n-minutes, skill-points, time-off-court, avg-raid-time,
+ *    raid-map-locations, phase-of-play
+ *  - added: match-events (cards, substitutions, technical points)
  */
 class LiveFeedBuilder
 {
+    /**
+     * raid-outcome-id. Follows the client's sample data (2 = empty, 3 = unsuccessful).
+     * NOTE: the client's written answer said 2 = unsuccessful, 3 = empty. Confirm with the client;
+     * to switch, swap the two values below.
+     */
     public const OUTCOME_CODES = [
         'successful' => 1,
-        'unsuccessful' => 2,
-        'empty' => 3,
+        'empty' => 2,
+        'unsuccessful' => 3,
     ];
 
     private const STATUS_MAP = [
@@ -54,13 +62,13 @@ class LiveFeedBuilder
         $teamIds = [(int) $match->team_a_id, (int) $match->team_b_id];
         $teams = [];
         foreach ($teamIds as $teamId) {
-            $teams[$teamId] = $this->emptyTeamStats();
+            $teams[$teamId] = $this->emptyStats(true);
         }
 
         $players = [];
         $playerTeam = [];
         foreach ($match->matchPlayers as $mp) {
-            $players[(int) $mp->user_id] = $this->emptyPlayerStats();
+            $players[(int) $mp->user_id] = $this->emptyStats(false);
             $playerTeam[(int) $mp->user_id] = (int) $mp->team_id;
         }
 
@@ -82,7 +90,9 @@ class LiveFeedBuilder
             }
             $defTeam = $raidTeam === $teamIds[0] ? $teamIds[1] : $teamIds[0];
             $raiderId = (int) $raid->raider_id;
-            $before = [$raidTeam => $this->teamTotal($teams[$raidTeam]), $defTeam => $this->teamTotal($teams[$defTeam])];
+
+            $before = [$raidTeam => $this->pointParts($teams[$raidTeam]), $defTeam => $this->pointParts($teams[$defTeam])];
+            $raiderBefore = isset($players[$raiderId]) ? $players[$raiderId]['raid'] : null;
 
             // Do-or-die: third raid after two consecutive empty raids by the same team.
             $isDoOrDie = ($emptyStreak[$raidTeam] ?? 0) >= 2;
@@ -98,33 +108,43 @@ class LiveFeedBuilder
             }
 
             if ($isDoOrDie) {
-                $raidPts = $this->teamTotal($teams[$raidTeam]) - $before[$raidTeam];
-                $this->countDoOrDie($teams[$raidTeam]['do-or-die'], $outcome, $raidPts);
-                if (isset($players[$raiderId])) {
-                    $this->countDoOrDie($players[$raiderId]['do-or-die'], $outcome, $raidPts);
+                $after = $this->pointParts($teams[$raidTeam]);
+                $touch = $after['touch'] - $before[$raidTeam]['touch'];
+                $bonus = $after['bonus'] - $before[$raidTeam]['bonus'];
+                $this->countDoOrDie($teams[$raidTeam]['do-or-die'], $outcome, (bool) $raid->super_raid, $touch, $bonus);
+                if ($raiderBefore !== null) {
+                    $this->countDoOrDie(
+                        $players[$raiderId]['do-or-die'],
+                        $outcome,
+                        (bool) $raid->super_raid,
+                        $players[$raiderId]['raid']['touch'] - $raiderBefore['touch'],
+                        $players[$raiderId]['raid']['bonus'] - $raiderBefore['bonus'],
+                    );
                 }
             }
 
             $emptyStreak[$raidTeam] = ($outcome === 'empty' && !$isDoOrDie) ? $emptyStreak[$raidTeam] + 1 : 0;
 
             $raider = $match->matchPlayers->firstWhere('user_id', $raiderId);
+            $raidDelta = $this->delta($before[$raidTeam], $this->pointParts($teams[$raidTeam]));
+            $defDelta = $this->delta($before[$defTeam], $this->pointParts($teams[$defTeam]));
+
             $playByPlay[] = [
                 'raid-number' => $this->s($raid->raid_number),
-                'raid-half' => $this->s($raid->half),
                 'raiding-team-id' => $this->s($raidTeam),
                 'raiding-player-id' => $this->s($raiderId),
                 'player-jersey-no' => $this->s($raider?->user?->jersey_no),
                 'raid-outcome-id' => $this->s(self::OUTCOME_CODES[$outcome]),
-                'do-or-die' => $isDoOrDie ? 'true' : 'false',
+                'raid-half' => $this->s($raid->half),
                 // team[0] is always the raiding team
                 'team' => [
-                    ['team-id' => $this->s($raidTeam), 'points' => $this->s($this->teamTotal($teams[$raidTeam]) - $before[$raidTeam])],
-                    ['team-id' => $this->s($defTeam), 'points' => $this->s($this->teamTotal($teams[$defTeam]) - $before[$defTeam])],
+                    $this->raidingTeamRaidPoints($raidTeam, $raidDelta),
+                    $this->defendingTeamRaidPoints($defTeam, $defDelta),
                 ],
             ];
         }
 
-        // Technical points (non-raid events)
+        // Technical points (non-raid events) + match events
         $matchEvents = [];
         foreach ($match->events as $event) {
             $type = $event->type?->value;
@@ -140,7 +160,6 @@ class LiveFeedBuilder
 
         $this->checkTotals($teams, $players, $playerTeam);
 
-        // Team blocks
         $teamBlocks = [];
         foreach ($teamIds as $teamId) {
             $teamName = $match->teams->firstWhere('team_id', $teamId)?->team?->name;
@@ -154,7 +173,7 @@ class LiveFeedBuilder
         }
 
         $status = $match->status instanceof MatchStatus ? $match->status->value : $match->status;
-        $currentHalf = $lastRaid?->half ?? ($status === 'second_half' ? 2 : 1);
+        $currentHalf = (int) ($lastRaid?->half ?? ($status === 'second_half' ? 2 : 1));
 
         return [
             'meta' => [
@@ -168,8 +187,8 @@ class LiveFeedBuilder
             'in-match' => [
                 'team-players-statistics' => ['team' => $teamBlocks],
                 'play-by-play' => ['raid' => $playByPlay],
-                'match-events' => ['event' => $matchEvents],
                 'match-details' => ['result' => $this->result($match, $status, $currentHalf, $lastRaid, $teamIds, $scores)],
+                'match-events' => ['event' => $matchEvents],
             ],
         ];
     }
@@ -260,19 +279,91 @@ class LiveFeedBuilder
         }
     }
 
-    private function countDoOrDie(array &$bucket, string $outcome, int $points): void
+    private function countDoOrDie(array &$bucket, string $outcome, bool $superRaid, int $touch, int $bonus): void
     {
         $bucket['total']++;
-        $bucket[$outcome]++;
-        $bucket['points'] += max($points, 0);
+        if ($outcome === 'successful') {
+            $bucket['successful']++;
+        } else {
+            $bucket['failed']++; // unsuccessful or empty do-or-die raid
+        }
+        if ($superRaid) {
+            $bucket['super']++;
+        }
+        $bucket['touch'] += max($touch, 0);
+        $bucket['bonus'] += max($bonus, 0);
+    }
+
+    private function pointParts(array $t): array
+    {
+        return [
+            'touch' => $t['raid']['touch'],
+            'bonus' => $t['raid']['bonus'],
+            'capture' => $t['tackle']['capture'],
+            'tackle-bonus' => $t['tackle']['bonus'],
+            'all-out' => $t['all-out'],
+            'extra' => $t['extra']['technical'] + $t['extra']['lineout'],
+        ];
+    }
+
+    private function delta(array $before, array $after): array
+    {
+        $d = [];
+        foreach ($after as $k => $v) {
+            $d[$k] = $v - $before[$k];
+        }
+        return $d;
     }
 
     private function teamTotal(array $t): int
     {
-        return $t['raid']['touch'] + $t['raid']['bonus']
-            + $t['tackle']['capture'] + $t['tackle']['bonus']
-            + $t['all-out']
-            + $t['extra']['technical'] + $t['extra']['lineout'];
+        return array_sum($this->pointParts($t));
+    }
+
+    private function raidingTeamRaidPoints(int $teamId, array $d): array
+    {
+        $total = (string) array_sum($d);
+
+        return [
+            'team-id' => (string) $teamId,
+            'total-points' => $total,
+            'points' => [
+                'total-points' => $total,
+                'raid-points' => [
+                    'total-raid-points' => (string) ($d['touch'] + $d['bonus']),
+                    'touch-points' => (string) $d['touch'],
+                    'raid-bonus-points' => (string) $d['bonus'],
+                ],
+                'tackle-points' => [
+                    'total-tackle-points' => (string) ($d['capture'] + $d['tackle-bonus']),
+                ],
+                'all-out-points' => (string) $d['all-out'],
+                'extra-points' => (string) $d['extra'],
+            ],
+        ];
+    }
+
+    private function defendingTeamRaidPoints(int $teamId, array $d): array
+    {
+        $total = (string) array_sum($d);
+
+        return [
+            'team-id' => (string) $teamId,
+            'total-points' => $total,
+            'points' => [
+                'total-points' => $total,
+                'raid-points' => [
+                    'total-raid-points' => (string) ($d['touch'] + $d['bonus']),
+                ],
+                'tackle-points' => [
+                    'total-tackle-points' => (string) ($d['capture'] + $d['tackle-bonus']),
+                    'capture-points' => (string) $d['capture'],
+                    'tackle-bonus-points' => (string) $d['tackle-bonus'],
+                ],
+                'all-out-points' => (string) $d['all-out'],
+                'extra-points' => (string) $d['extra'],
+            ],
+        ];
     }
 
     /**
@@ -310,38 +401,52 @@ class LiveFeedBuilder
         $onCourt = $teamPlayers->filter(fn($mp) => !$mp->is_substitute && $mp->is_playing)->count();
 
         $playerBlocks = [];
-        foreach ($teamPlayers as $mp) {
+        foreach ($teamPlayers->sortBy(fn($mp) => (int) ($mp->user?->jersey_no ?? 999)) as $mp) {
             $userId = (int) $mp->user_id;
-            $p = $players[$userId] ?? $this->emptyPlayerStats();
-            $revival = array_search($userId, $outQueue, true);
+            $p = $players[$userId] ?? $this->emptyStats(false);
             $raidTotal = $p['raid']['touch'] + $p['raid']['bonus'];
             $tackleTotal = $p['tackle']['capture'] + $p['tackle']['bonus'];
 
-            $playerBlocks[] = [
+            $block = [
                 'player-id' => $this->s($userId),
                 'jersey-no' => $this->s($mp->user?->jersey_no),
                 'player-name' => $mp->user?->fullname,
-                'player-on-court' => (!$mp->is_substitute && $mp->is_playing) ? 'true' : 'false',
-                'player-revival-order' => $revival === false ? '0' : $this->s($revival + 1),
+            ];
+
+            // As in the client format: on-court flag only when on court, revival order only when out.
+            if (!$mp->is_substitute && $mp->is_playing) {
+                $block['player-on-court'] = 'true';
+            } else {
+                $revival = array_search($userId, $outQueue, true);
+                if ($revival !== false) {
+                    $block['player-revival-order'] = (string) ($revival + 1);
+                }
+            }
+
+            $playerBlocks[] = $block + [
                 'points' => [
                     'total-points' => $this->s($raidTotal + $tackleTotal),
                     'raid-points' => [
-                        'total' => $this->s($raidTotal),
-                        'touch' => $this->s($p['raid']['touch']),
-                        'bonus' => $this->s($p['raid']['bonus']),
+                        'total-raid-points' => $this->s($raidTotal),
+                        'touch-points' => [
+                            'total-touch-points' => $this->s($p['raid']['touch']),
+                        ],
+                        'raid-bonus-points' => $this->s($p['raid']['bonus']),
                     ],
                     'tackle-points' => [
-                        'total' => $this->s($tackleTotal),
-                        'capture' => $this->s($p['tackle']['capture']),
-                        'bonus' => $this->s($p['tackle']['bonus']),
+                        'total-tackle-points' => $this->s($tackleTotal),
+                        'capture-points' => [
+                            'total-capture-points' => $this->s($p['tackle']['capture']),
+                        ],
+                        'tackle-bonus-points' => $this->s($p['tackle']['bonus']),
                     ],
                 ],
                 'raids' => $this->raidCounters($p['raids']),
                 'tackles' => $this->tackleCounters($p['tackles']),
                 'cards' => [
-                    'green' => $this->s($mp->green_card ?? 0),
-                    'yellow' => $this->s($mp->yellow_card ?? 0),
-                    'red' => $this->s($mp->red_card ?? 0),
+                    'green-card' => $this->card($mp->green_card),
+                    'yellow-card' => $this->card($mp->yellow_card),
+                    'red-card' => $this->card($mp->red_card),
                 ],
                 'do-or-die' => $this->doOrDieCounters($p['do-or-die']),
             ];
@@ -357,14 +462,14 @@ class LiveFeedBuilder
             'points' => [
                 'total-points' => $this->s($this->teamTotal($t)),
                 'tackle-points' => [
-                    'total' => $this->s($tackleTotal),
-                    'capture' => $this->s($t['tackle']['capture']),
-                    'tackle-bonus' => $this->s($t['tackle']['bonus']),
+                    'total-tackle-points' => $this->s($tackleTotal),
+                    'capture-points' => $this->s($t['tackle']['capture']),
+                    'tackle-bonus-points' => $this->s($t['tackle']['bonus']),
                 ],
                 'raid-points' => [
-                    'total' => $this->s($raidTotal),
-                    'touch' => $this->s($t['raid']['touch']),
-                    'raid-bonus' => $this->s($t['raid']['bonus']),
+                    'total-raid-points' => $this->s($raidTotal),
+                    'touch-points' => $this->s($t['raid']['touch']),
+                    'raid-bonus-points' => $this->s($t['raid']['bonus']),
                 ],
                 'all-out-points' => $this->s($t['all-out']),
                 'extra-points' => $this->s($t['extra']['technical'] + $t['extra']['lineout']),
@@ -374,6 +479,13 @@ class LiveFeedBuilder
             'do-or-die' => $this->doOrDieCounters($t['do-or-die']),
             'players' => ['player' => $playerBlocks],
         ];
+    }
+
+    private function card($count): array
+    {
+        $count = (string) ((int) $count);
+
+        return ['count' => $count, '#text' => $count];
     }
 
     private function raidCounters(array $r): array
@@ -401,10 +513,12 @@ class LiveFeedBuilder
     {
         return [
             'total-raids' => $this->s($d['total']),
-            'successful-raids' => $this->s($d['successful']),
-            'unsuccessful-raids' => $this->s($d['unsuccessful']),
-            'empty-raids' => $this->s($d['empty']),
-            'points' => $this->s($d['points']),
+            'successful-raids' => $this->s($d['successful']), // client sample: "successfull-raids"
+            'failed-raids' => $this->s($d['failed']),
+            'super-raids' => $this->s($d['super']),
+            'raid-points' => $this->s($d['touch'] + $d['bonus']),
+            'touch-points' => $this->s($d['touch']),
+            'bonus-points' => $this->s($d['bonus']),
         ];
     }
 
@@ -423,7 +537,7 @@ class LiveFeedBuilder
                 'type' => 'card',
                 'team-id' => $this->s($event->team_id),
                 'player-id' => $this->s($event->user_id),
-                'card' => str_replace('_card', '', (string) $event->card_type), // green | yellow | red
+                'card' => str_replace('_', '-', (string) $event->card_type), // green-card | yellow-card | red-card
             ];
         }
 
@@ -456,7 +570,7 @@ class LiveFeedBuilder
         return null;
     }
 
-    private function result(GameMatch $match, ?string $status, $currentHalf, ?Raid $lastRaid, array $teamIds, array $scores): array
+    private function result(GameMatch $match, ?string $status, int $currentHalf, ?Raid $lastRaid, array $teamIds, array $scores): array
     {
         // Teams alternate raids (a skipped raid still uses the turn).
         $nextRaidingTeam = null;
@@ -469,51 +583,46 @@ class LiveFeedBuilder
         $text = '';
 
         if ($status === MatchStatus::COMPLETED->value) {
+            $nameOf = fn($id) => $match->teams->firstWhere('team_id', $id)?->team?->name;
             $winner = $match->winner_team_id ? (int) $match->winner_team_id : null;
+
             if ($winner) {
                 $loser = $winner === $teamIds[0] ? $teamIds[1] : $teamIds[0];
-                $margin = $scores[(string) $winner] - $scores[(string) $loser];
-                $winnerName = $match->teams->firstWhere('team_id', $winner)?->team?->name;
-                $resultType = 'win';
-                $text = "{$winnerName} won by {$margin} point" . ($margin === 1 ? '' : 's');
+                $resultType = 'W';
+                // Same text format as the client sample: "Kenya Beat Singapore  (39-26 )"
+                $text = sprintf('%s Beat %s  (%d-%d )', $nameOf($winner), $nameOf($loser), $scores[(string) $winner], $scores[(string) $loser]);
             } else {
-                $resultType = 'draw';
-                $text = 'Match drawn';
+                $resultType = 'D';
+                $text = sprintf('%s Drew With %s  (%d-%d )', $nameOf($teamIds[0]), $nameOf($teamIds[1]), $scores[(string) $teamIds[0]], $scores[(string) $teamIds[1]]);
             }
         }
 
         return [
             'Stage' => $match->stage,
-            'Half' => (string) $currentHalf,
+            'Half' => $currentHalf === 2 ? '2nd Half' : '1st Half',
             'RaidingClubId' => $this->s($nextRaidingTeam),
             'result-type' => $resultType,
             'winning-team-id' => $this->s($winner),
-            'result' => $text,
+            '#text' => $text,
         ];
     }
 
-    private function emptyTeamStats(): array
+    private function emptyStats(bool $team): array
     {
-        return [
-            'raid' => ['touch' => 0, 'bonus' => 0],
-            'tackle' => ['capture' => 0, 'bonus' => 0],
-            'all-out' => 0,
-            'extra' => ['technical' => 0, 'lineout' => 0],
-            'raids' => ['total' => 0, 'super' => 0, 'successful' => 0, 'unsuccessful' => 0, 'empty' => 0],
-            'tackles' => ['super' => 0, 'successful' => 0, 'unsuccessful' => 0],
-            'do-or-die' => ['total' => 0, 'successful' => 0, 'unsuccessful' => 0, 'empty' => 0, 'points' => 0],
-        ];
-    }
-
-    private function emptyPlayerStats(): array
-    {
-        return [
+        $stats = [
             'raid' => ['touch' => 0, 'bonus' => 0],
             'tackle' => ['capture' => 0, 'bonus' => 0],
             'raids' => ['total' => 0, 'super' => 0, 'successful' => 0, 'unsuccessful' => 0, 'empty' => 0],
             'tackles' => ['super' => 0, 'successful' => 0, 'unsuccessful' => 0],
-            'do-or-die' => ['total' => 0, 'successful' => 0, 'unsuccessful' => 0, 'empty' => 0, 'points' => 0],
+            'do-or-die' => ['total' => 0, 'successful' => 0, 'failed' => 0, 'super' => 0, 'touch' => 0, 'bonus' => 0],
         ];
+
+        if ($team) {
+            $stats['all-out'] = 0;
+            $stats['extra'] = ['technical' => 0, 'lineout' => 0];
+        }
+
+        return $stats;
     }
 
     private function s($value): string

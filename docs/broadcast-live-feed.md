@@ -112,7 +112,7 @@ Every message carries the **full match state** in `data`, plus the raid that jus
 
 ### Snapshot format
 
-All numbers inside `in-match` are strings, in line with the client format.
+Same structure and key names as the client's existing live scoring JSON, plus a `meta` header and a `match-events` list. All numbers inside `in-match` are strings.
 
 ```
 meta
@@ -124,35 +124,50 @@ in-match
   team-players-statistics.team[]
     team-name, team-id, no-of-players-on-court
     points: total-points
-            tackle-points { total, capture, tackle-bonus }
-            raid-points   { total, touch, raid-bonus }
+            tackle-points { total-tackle-points, capture-points, tackle-bonus-points }
+            raid-points   { total-raid-points, touch-points, raid-bonus-points }
             all-out-points, extra-points
-    raids:   total-raids, super-raids, successful-raids, unsuccessful-raids, empty-raids
-    tackles: total-tackles, super-tackles, successful-tackles, unsuccessful-tackles
-    do-or-die: total-raids, successful-raids, unsuccessful-raids, empty-raids, points
+    raids:     total-raids, super-raids, successful-raids, unsuccessful-raids, empty-raids
+    tackles:   total-tackles, super-tackles, successful-tackles, unsuccessful-tackles
+    do-or-die: total-raids, successful-raids, failed-raids, super-raids, raid-points, touch-points, bonus-points
     players.player[]
-      player-id, jersey-no, player-name, player-on-court ("true"/"false"),
-      player-revival-order ("0" = on court, "1" = next to come back)
-      points { total-points, raid-points {total, touch, bonus}, tackle-points {total, capture, bonus} }
-      raids, tackles, cards { green, yellow, red }, do-or-die
+      player-id, jersey-no, player-name
+      player-on-court: "true"        only present when the player is on court
+      player-revival-order: "1".."n" only present when the player is out (1 = next to come back)
+      points { total-points,
+               raid-points   { total-raid-points, touch-points { total-touch-points }, raid-bonus-points },
+               tackle-points { total-tackle-points, capture-points { total-capture-points }, tackle-bonus-points } }
+      raids, tackles, do-or-die (same keys as team)
+      cards { green-card { count, #text }, yellow-card {...}, red-card {...} }
   play-by-play.raid[]
-    raid-number, raid-half, raiding-team-id, raiding-player-id, player-jersey-no,
-    raid-outcome-id, do-or-die,
-    team[]  { team-id, points }   team[0] is always the raiding team
-  match-events.event[]
+    raid-number, raiding-team-id, raiding-player-id, player-jersey-no, raid-outcome-id, raid-half
+    team[0] (raiding team):   team-id, total-points, points { total-points,
+                              raid-points { total-raid-points, touch-points, raid-bonus-points },
+                              tackle-points { total-tackle-points }, all-out-points, extra-points }
+    team[1] (defending team): team-id, total-points, points { total-points,
+                              raid-points { total-raid-points },
+                              tackle-points { total-tackle-points, capture-points, tackle-bonus-points },
+                              all-out-points, extra-points }
+  match-details.result
+    Stage, Half ("1st Half" | "2nd Half"), RaidingClubId (team raiding next),
+    result-type ("W" | "D" | "" while live), winning-team-id,
+    #text ("Kenya Beat Singapore  (39-26 )", empty while live)
+  match-events.event[]            (new)
     type: card | substitution | technical-point
     event-id, half, raid-number, time, plus team-id / player-id / card / players-in / players-out
-  match-details.result
-    Stage, Half, RaidingClubId (team raiding next), result-type (win | draw | ""),
-    winning-team-id, result (text)
 ```
 
-**Raid outcome codes:** `1` successful, `2` unsuccessful, `3` empty.
+Changes from the client's existing format:
+- `successfull-raids` in `do-or-die` is spelled `successful-raids`.
+- Removed: `points-last-n-minutes`, `skill-points`, `time-off-court`, `avg-raid-time`, `raid-map-locations`, `phase-of-play`.
+- Added: `meta`, `match-events`.
+
+**Raid outcome codes:** `1` successful, `2` empty, `3` unsuccessful (as in the client's sample data).
 
 **Points:**
 - `extra-points` = technical points + lineout points.
-- `tackle-bonus` = super tackle extra point.
-- `total-points` = raid-points + tackle-points + all-out-points + extra-points.
+- `tackle-bonus-points` = super tackle extra point.
+- `total-points` = raid points + tackle points + all-out points + extra points.
 
 ### Limits and errors
 
