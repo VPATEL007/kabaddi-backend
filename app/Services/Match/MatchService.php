@@ -495,30 +495,63 @@ class MatchService implements MatchServiceInterface
 
     public function updateSubstitutes(UpdateMatchPlayerSubstitutesRequest $request, int $matchId)
     {
-        foreach ($request->getSubPlayers() as $player) {
-            if($player['is_substitute']){
-                MatchPlayer::where('match_id', $matchId)
-                ->where('user_id', $player['id'])
-                ->update([
-                    'is_playing' => false,
-                    'is_substitute' => true,
-                ]);
+        DB::transaction(function () use ($request, $matchId) {
+            $rows = $request->getSubPlayers();
+            $players = MatchPlayer::where('match_id', $matchId)
+                ->whereIn('user_id', array_column($rows, 'id'))
+                ->get()
+                ->keyBy(fn($mp) => (int) $mp->user_id);
+
+            // Only players whose bench status actually changes.
+            $outgoing = $incoming = [];
+            foreach ($rows as $row) {
+                $mp = $players->get((int) $row['id']);
+                if (!$mp) {
+                    continue;
+                }
+                $toBench = (bool) ($row['is_substitute'] ?? false);
+                if ($toBench && !$mp->is_substitute) {
+                    $outgoing[] = $mp;
+                } elseif (!$toBench && $mp->is_substitute) {
+                    $incoming[] = $mp;
+                }
             }
-            else{
-                MatchPlayer::where('match_id', $matchId)
-                ->where('user_id', $player['id'])
-                ->update([
-                    'is_playing' => true,
-                    'is_substitute' => false,
-                ]);
+
+            $payload = [];
+
+            // Pair each outgoing player with the next incoming player of the same team
+            // (request order). The incoming player takes over the outgoing player's slot:
+            // on court if they were on court, or their exact place in the revival order if out.
+            foreach ($outgoing as $out) {
+                $key = array_search($out->team_id, array_map(fn($mp) => $mp->team_id, $incoming), false);
+                if ($key === false) {
+                    // No replacement given: just bench them.
+                    $out->update(['is_playing' => false, 'is_substitute' => true]);
+                    $payload[] = ['id' => (int) $out->user_id, 'is_substitute' => true];
+                    continue;
+                }
+
+                $in = $incoming[$key];
+                array_splice($incoming, $key, 1);
+
+                MatchPlayer::swapSlots($out, $in);
+                $payload[] = ['id' => (int) $out->user_id, 'is_substitute' => true, 'slot_with' => (int) $in->user_id];
+                $payload[] = ['id' => (int) $in->user_id, 'is_substitute' => false];
             }
-        }
-        EventLog::create([
-            'match_id' => $matchId,
-            'type' => EventType::UPDATE_SUBSTITUTES->value,
-            'summary' => "Players substituted",
-            'payload' => $request->getSubPlayers(),
-        ]);
+
+            // Incoming players with no one going out: straight onto the court (previous behaviour).
+            foreach ($incoming as $in) {
+                $in->update(['is_playing' => true, 'is_substitute' => false]);
+                $payload[] = ['id' => (int) $in->user_id, 'is_substitute' => false];
+            }
+
+            EventLog::create([
+                'match_id' => $matchId,
+                'type' => EventType::UPDATE_SUBSTITUTES->value,
+                'summary' => "Players substituted",
+                'payload' => $payload,
+            ]);
+        });
 
         app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_SUBSTITUTION);
 
