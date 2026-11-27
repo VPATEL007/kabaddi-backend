@@ -329,24 +329,19 @@ class MatchService implements MatchServiceInterface
                 throw new Exception('Players must belong to this match and team.');
             }
 
+            if ($inPlayer->id === $outPlayer->id) {
+                throw new Exception('in_player and out_player must be different.');
+            }
+
             if ($inPlayer->is_playing) {
                 throw new Exception('Selected in_player is already playing.');
             }
 
-            if (!$outPlayer->is_playing) {
-                throw new Exception('Selected out_player is already out.');
-            }
-
-            // Swap
-            $inPlayer->update([
-                'is_playing' => true,
-                'updated_at' => now()
-            ]);
-
-            $outPlayer->update([
-                'is_playing' => false,
-                'updated_at' => now()
-            ]);
+            // The out player may be on court OR out (waiting for revival).
+            // The two players trade slots: the in player takes the out player's exact state
+            // (on court, or their place in the revival order: 1,2,3 out, 1 replaced by 4 => 4,2,3)
+            // and the out player takes the in player's place (e.g. the bench).
+            MatchPlayer::swapSlots($outPlayer, $inPlayer);
         });
 
         app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_SUBSTITUTION);
