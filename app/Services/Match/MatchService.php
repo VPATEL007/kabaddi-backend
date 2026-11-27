@@ -22,6 +22,7 @@ use Exception;
 use Illuminate\Support\Facades\DB;
 
 use Illuminate\Contracts\Pagination\LengthAwarePaginator;
+use App\Services\Broadcast\BroadcastPublisher;
 use App\Services\Scoreboard\ScoreboardServiceInterface;
 use Illuminate\Support\Facades\Auth;
 
@@ -88,6 +89,7 @@ class MatchService implements MatchServiceInterface
     {
 
         $match = GameMatch::findOrFail($matchId);
+        $previousStatus = $match->status;
         $status = $data['status'] ?? null;
         if ($status) {
             $status = MatchStatus::from($status);
@@ -135,6 +137,14 @@ class MatchService implements MatchServiceInterface
         }
 
         $match->update($data);
+
+        if ($status->value !== $previousStatus) {
+            app(BroadcastPublisher::class)->trigger($matchId, match (true) {
+                $status === MatchStatus::COMPLETED => BroadcastPublisher::EVENT_ENDED,
+                $previousStatus === MatchStatus::UPCOMING->value => BroadcastPublisher::EVENT_MATCH_STARTED,
+                default => BroadcastPublisher::EVENT_STATUS,
+            });
+        }
 
         return $match->load('teams');
     }
@@ -268,6 +278,8 @@ class MatchService implements MatchServiceInterface
             'is_fixture' => false,
         ]);
 
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_LINEUP);
+
         return $match->load('matchPlayers');
     }
 
@@ -336,6 +348,8 @@ class MatchService implements MatchServiceInterface
                 'updated_at' => now()
             ]);
         });
+
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_SUBSTITUTION);
     }
 
     public function updateCard(UpdateMatchPlayerCardRequest $request, int $matchId)
@@ -377,6 +391,8 @@ class MatchService implements MatchServiceInterface
             'summary' => $summary,
             'card_type' => $cardType
         ]);
+
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_CARD);
 
         return GameMatch::with(['teams'])->findOrFail($matchId);
     }
@@ -503,6 +519,8 @@ class MatchService implements MatchServiceInterface
             'summary' => "Players substituted",
             'payload' => $request->getSubPlayers(),
         ]);
+
+        app(BroadcastPublisher::class)->trigger($matchId, BroadcastPublisher::EVENT_SUBSTITUTION);
 
         return $this->detail($matchId);
     }

@@ -14,9 +14,30 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware) {
-        //
+        $middleware->alias([
+            'broadcast.partner' => \App\Http\Middleware\AuthenticateBroadcastPartner::class,
+        ]);
     })
     ->withExceptions(function (Exceptions $exceptions) {
+
+        // Broadcaster API (api/v1/broadcast/*): partners need real HTTP status codes.
+        $exceptions->render(function (Throwable $e, $request) {
+            if (! $request->is('api/v1/broadcast/*')) {
+                return;
+            }
+
+            if ($e instanceof \Illuminate\Validation\ValidationException) {
+                return response()->json(['message' => 'Validation error', 'errors' => $e->errors()], 422);
+            }
+
+            if ($e instanceof \Symfony\Component\HttpKernel\Exception\HttpExceptionInterface) {
+                return response()->json(['message' => $e->getMessage() ?: 'Error'], $e->getStatusCode(), $e->getHeaders());
+            }
+
+            report($e);
+
+            return response()->json(['message' => 'Server error'], 500);
+        });
 
         // Authentication errors
         $exceptions->render(function (
