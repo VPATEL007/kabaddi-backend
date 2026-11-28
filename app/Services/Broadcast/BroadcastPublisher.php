@@ -5,14 +5,14 @@ namespace App\Services\Broadcast;
 use App\Events\MatchFeedUpdated;
 use App\Models\MatchBroadcastState;
 use App\Models\MatchFeedSnapshot;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
 /**
  * Publishes new versions of a match's live feed.
  *
- * Flow: build feed -> version + 1 (row lock) -> save snapshot -> cache -> push over WebSocket.
+ * Flow: build feed -> version + 1 (row lock) -> save snapshot -> push over WebSocket.
+ * No cache: /live reads the current snapshot straight from the database, so it is never stale.
  * Auto mode: scoring code calls trigger(); the publish runs after the HTTP response has been
  * sent to the scorer, so scoring stays fast and partners get the update well under a second.
  * Registered as a singleton so several triggers in one request collapse into one publish.
@@ -38,15 +38,6 @@ class BroadcastPublisher
     private bool $flushRegistered = false;
 
     public function __construct(private LiveFeedBuilder $builder) {}
-
-    /**
-     * One cache entry per version. A version's content never changes, so entries can't go stale
-     * and two publishes finishing in the wrong order can't overwrite each other.
-     */
-    public static function cacheKey(int $matchId, int $version): string
-    {
-        return "broadcast:feed:{$matchId}:v{$version}";
-    }
 
     /**
      * Called from scoring code after a change. Publishes only when the feed is on and in Auto mode.
@@ -134,8 +125,6 @@ class BroadcastPublisher
             return $snapshot;
         });
 
-        Cache::put(self::cacheKey($matchId, $snapshot->version), $snapshot->payload, now()->addDays(2));
-
         try {
             broadcast(new MatchFeedUpdated($matchId, $event, $snapshot->payload));
         } catch (Throwable $e) {
@@ -155,7 +144,7 @@ class BroadcastPublisher
     }
 
     /**
-     * Payload of the current version (or of $version when given), from cache or database.
+     * Payload of the current version (or of $version when given), read from the database.
      */
     public function latest(int $matchId, ?int $version = null): ?array
     {
@@ -164,14 +153,6 @@ class BroadcastPublisher
             return null;
         }
 
-        $payload = Cache::get(self::cacheKey($matchId, $version));
-        if ($payload === null) {
-            $payload = MatchFeedSnapshot::where('match_id', $matchId)->where('version', $version)->first()?->payload;
-            if ($payload !== null) {
-                Cache::put(self::cacheKey($matchId, $version), $payload, now()->addDays(2));
-            }
-        }
-
-        return $payload;
+        return MatchFeedSnapshot::where('match_id', $matchId)->where('version', $version)->first()?->payload;
     }
 }

@@ -67,14 +67,14 @@ Scorer saves raid -> RaidService (DB) -> response to scorer
                                      \-> (after response) BroadcastPublisher
                                            - lock match_broadcast_states row, version + 1
                                            - LiveFeedBuilder builds the JSON from the DB
-                                           - save match_feed_snapshots row, update cache
+                                           - save match_feed_snapshots row (/live reads it directly, no cache)
                                            - MatchFeedUpdated -> Reverb -> subscribed broadcasters
 ```
 
 | File | Role |
 |---|---|
 | `app/Services/Broadcast/LiveFeedBuilder.php` | DB to client JSON. Same scoring rules as ScoreboardService. `OUTCOME_CODES` sets raid-outcome-id. |
-| `app/Services/Broadcast/BroadcastPublisher.php` | Versioning, snapshot, cache, WebSocket push |
+| `app/Services/Broadcast/BroadcastPublisher.php` | Versioning, snapshot, WebSocket push |
 | `app/Events/MatchFeedUpdated.php` | WebSocket event |
 | `app/Http/Controllers/Broadcast/BroadcastControlController.php` | Scoring panel |
 | `app/Http/Controllers/Broadcast/PartnerFeedController.php` | Broadcaster API |
