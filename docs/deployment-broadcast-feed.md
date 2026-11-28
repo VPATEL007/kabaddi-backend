@@ -231,7 +231,7 @@ curl -H "X-API-Key: <key>" https://your-domain.com/api/v1/broadcast/matches
 ```
 
 Then switch on the feed for a match from the scoring panel:
-`POST /api/match/{id}/broadcast/enable` with the scorer's token. Record a raid and check that the test client receives `feed.updated`. See `docs/broadcast-live-feed.md`.
+`POST /api/match/{id}/broadcast/enable` with the scorer's token. Record a raid and check that the test client receives `feed.updated`. For a test client, see the WebSocket section in `docs/broadcast-internal.md`.
 
 Finally, deactivate the test broadcaster: `php artisan broadcast:partner --id=<id> --deactivate`.
 
