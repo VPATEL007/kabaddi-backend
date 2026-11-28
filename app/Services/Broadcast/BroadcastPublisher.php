@@ -39,9 +39,13 @@ class BroadcastPublisher
 
     public function __construct(private LiveFeedBuilder $builder) {}
 
-    public static function cacheKey(int $matchId): string
+    /**
+     * One cache entry per version. A version's content never changes, so entries can't go stale
+     * and two publishes finishing in the wrong order can't overwrite each other.
+     */
+    public static function cacheKey(int $matchId, int $version): string
     {
-        return "broadcast:feed:{$matchId}";
+        return "broadcast:feed:{$matchId}:v{$version}";
     }
 
     /**
@@ -130,7 +134,7 @@ class BroadcastPublisher
             return $snapshot;
         });
 
-        Cache::put(self::cacheKey($matchId), $snapshot->payload, now()->addDays(2));
+        Cache::put(self::cacheKey($matchId, $snapshot->version), $snapshot->payload, now()->addDays(2));
 
         try {
             broadcast(new MatchFeedUpdated($matchId, $event, $snapshot->payload));
@@ -143,12 +147,31 @@ class BroadcastPublisher
     }
 
     /**
-     * Latest published payload, from cache or database.
+     * Current version number, read from the database (source of truth). 0 = feed not started.
      */
-    public function latest(int $matchId): ?array
+    public function latestVersion(int $matchId): int
     {
-        return Cache::remember(self::cacheKey($matchId), now()->addDays(2), function () use ($matchId) {
-            return MatchFeedSnapshot::where('match_id', $matchId)->orderByDesc('version')->first()?->payload;
-        });
+        return (int) MatchBroadcastState::where('match_id', $matchId)->value('current_version');
+    }
+
+    /**
+     * Payload of the current version (or of $version when given), from cache or database.
+     */
+    public function latest(int $matchId, ?int $version = null): ?array
+    {
+        $version ??= $this->latestVersion($matchId);
+        if ($version < 1) {
+            return null;
+        }
+
+        $payload = Cache::get(self::cacheKey($matchId, $version));
+        if ($payload === null) {
+            $payload = MatchFeedSnapshot::where('match_id', $matchId)->where('version', $version)->first()?->payload;
+            if ($payload !== null) {
+                Cache::put(self::cacheKey($matchId, $version), $payload, now()->addDays(2));
+            }
+        }
+
+        return $payload;
     }
 }
