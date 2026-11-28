@@ -5,14 +5,14 @@ namespace App\Services\Broadcast;
 use App\Events\MatchFeedUpdated;
 use App\Models\MatchBroadcastState;
 use App\Models\MatchFeedSnapshot;
-use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
 /**
  * Publishes new versions of a match's live feed.
  *
- * Flow: build feed -> version + 1 (row lock) -> save snapshot -> cache -> push over WebSocket.
+ * Flow: build feed -> version + 1 (row lock) -> save snapshot -> push over WebSocket.
+ * No cache: /live reads the current snapshot straight from the database, so it is never stale.
  * Auto mode: scoring code calls trigger(); the publish runs after the HTTP response has been
  * sent to the scorer, so scoring stays fast and partners get the update well under a second.
  * Registered as a singleton so several triggers in one request collapse into one publish.
@@ -38,11 +38,6 @@ class BroadcastPublisher
     private bool $flushRegistered = false;
 
     public function __construct(private LiveFeedBuilder $builder) {}
-
-    public static function cacheKey(int $matchId): string
-    {
-        return "broadcast:feed:{$matchId}";
-    }
 
     /**
      * Called from scoring code after a change. Publishes only when the feed is on and in Auto mode.
@@ -130,8 +125,6 @@ class BroadcastPublisher
             return $snapshot;
         });
 
-        Cache::put(self::cacheKey($matchId), $snapshot->payload, now()->addDays(2));
-
         try {
             broadcast(new MatchFeedUpdated($matchId, $event, $snapshot->payload));
         } catch (Throwable $e) {
@@ -143,12 +136,23 @@ class BroadcastPublisher
     }
 
     /**
-     * Latest published payload, from cache or database.
+     * Current version number, read from the database (source of truth). 0 = feed not started.
      */
-    public function latest(int $matchId): ?array
+    public function latestVersion(int $matchId): int
     {
-        return Cache::remember(self::cacheKey($matchId), now()->addDays(2), function () use ($matchId) {
-            return MatchFeedSnapshot::where('match_id', $matchId)->orderByDesc('version')->first()?->payload;
-        });
+        return (int) MatchBroadcastState::where('match_id', $matchId)->value('current_version');
+    }
+
+    /**
+     * Payload of the current version (or of $version when given), read from the database.
+     */
+    public function latest(int $matchId, ?int $version = null): ?array
+    {
+        $version ??= $this->latestVersion($matchId);
+        if ($version < 1) {
+            return null;
+        }
+
+        return MatchFeedSnapshot::where('match_id', $matchId)->where('version', $version)->first()?->payload;
     }
 }

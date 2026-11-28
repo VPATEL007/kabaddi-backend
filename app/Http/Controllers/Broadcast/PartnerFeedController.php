@@ -83,12 +83,13 @@ class PartnerFeedController extends Controller
             return response()->json(['message' => 'Match not found.'], 404);
         }
 
-        $payload = $this->publisher->latest($match->id);
-        if (!$payload) {
+        // The version comes from the database, so /live always reflects the newest publish.
+        $version = $this->publisher->latestVersion($match->id);
+        if ($version < 1) {
             return response()->json(['message' => 'The live feed for this match has not started yet.'], 404);
         }
 
-        $etag = '"' . $payload['meta']['version'] . '"';
+        $etag = '"' . $version . '"';
 
         // Proxies/compression (e.g. Hostinger LiteSpeed) turn the ETag into a weak one: W/"42".
         // Accept both forms, and a comma-separated list.
@@ -97,7 +98,12 @@ class PartnerFeedController extends Controller
             explode(',', (string) $request->header('If-None-Match'))
         );
         if (in_array($etag, $sent, true)) {
-            return response('', 304)->header('ETag', $etag);
+            return response('', 304)->header('ETag', $etag); // no payload load needed
+        }
+
+        $payload = $this->publisher->latest($match->id, $version);
+        if (!$payload) {
+            return response()->json(['message' => 'The live feed for this match has not started yet.'], 404);
         }
 
         return response()->json($payload)
